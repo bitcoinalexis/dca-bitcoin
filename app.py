@@ -9,6 +9,13 @@ import plotly.graph_objects as go
 import os
 import sys
 import subprocess
+import socket
+import secrets
+import threading
+import time
+import io
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 #  cd "/home/alexis/AngyLabs/DCA BITCOIN" && streamlit run app.py
 
@@ -248,33 +255,280 @@ def importar_db_bytes(data: bytes) -> tuple[bool, str]:
                 pass
 
 
+def obtener_ip_local() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+class _DBHandler(BaseHTTPRequestHandler):
+    server_version = "DCAOnor/1.0"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        token_ok = parse_qs(parsed.query).get("t", [None])[0] == self.server.token
+        if parsed.path == "/db" and token_ok and self.server.descargas < 1:
+            try:
+                data = exportar_db_bytes()
+            except Exception:
+                self.send_error(500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", "attachment; filename=dca_bitcoin.db")
+            self.end_headers()
+            self.wfile.write(data)
+            self.server.descargas += 1
+            try:
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+            except Exception:
+                pass
+        else:
+            self.send_error(404)
+
+
+QR_PORT = 8766
+
+
+def iniciar_servidor_qr(duracion_seg: int = 180):
+    token = secrets.token_urlsafe(16)
+    try:
+        httpd = ThreadingHTTPServer(("0.0.0.0", QR_PORT), _DBHandler)
+    except OSError:
+        httpd = ThreadingHTTPServer(("0.0.0.0", 0), _DBHandler)
+    httpd.token = token
+    httpd.descargas = 0
+    puerto = httpd.server_address[1]
+    hilo = threading.Thread(target=httpd.serve_forever, daemon=True)
+    hilo.start()
+
+    def _apagar():
+        time.sleep(duracion_seg)
+        try:
+            httpd.shutdown()
+            httpd.server_close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_apagar, daemon=True).start()
+    ip = obtener_ip_local()
+    url = f"http://{ip}:{puerto}/db?t={token}"
+    return url, httpd
+
+
+def generar_qr_png(texto: str) -> bytes | None:
+    try:
+        import qrcode
+    except ImportError:
+        return None
+    img = qrcode.make(texto)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def inyectar_css():
     st.markdown("""
         <style>
-        section[data-testid="stSidebar"] { background-color: #1a1a2e; }
-        section[data-testid="stSidebar"] * { color: #e0e0e0 !important; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-        div[data-testid="metric-container"] {
-            background: #1e1e2e;
-            border: 1px solid #f7931a33;
-            border-radius: 10px;
-            padding: 12px 16px;
+        html, body, [class*="css"], .stApp {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
-        div[data-testid="metric-container"] label { color: #aaaaaa !important; }
-        div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
+
+        .stApp {
+            background: linear-gradient(160deg, #0d1117 0%, #131a26 50%, #0d1117 100%);
+        }
+
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #161b27 0%, #11151f 100%);
+            border-right: 1px solid #2a3247;
+        }
+        section[data-testid="stSidebar"] * { color: #d7dce6 !important; }
+        section[data-testid="stSidebar"] hr { border-color: #2a3247; }
+
+        h1 {
             color: #f7931a !important;
-            font-size: 1.3rem !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.5px;
+        }
+        h2, h3, h4 { color: #e8ecf3 !important; font-weight: 700 !important; }
+
+        div[data-testid="stMarkdownContainer"] p { color: #ffffff; }
+
+        div[data-testid="stMetric"] {
+            background: linear-gradient(145deg, #1a2030 0%, #161b27 100%);
+            border: 1px solid #2a3247;
+            border-radius: 14px;
+            padding: 16px 18px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+            transition: border-color .2s ease, transform .2s ease;
+        }
+        div[data-testid="stMetric"]:hover {
+            border-color: #f7931a66;
+            transform: translateY(-2px);
+        }
+        div[data-testid="stMetric"] label { color: #8b93a7 !important; font-size: .8rem !important; }
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+            color: #f7931a !important;
+            font-size: 1.35rem !important;
+            font-weight: 700 !important;
         }
 
-        div.stButton > button[kind="primary"] {
-            background-color: #f7931a;
-            color: #000;
-            font-weight: 700;
-            border: none;
+        .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+            border-radius: 10px !important;
+            font-weight: 600 !important;
+            padding: 0.55rem 1.1rem !important;
+            transition: all .2s ease !important;
         }
-        div.stButton > button[kind="primary"]:hover { background-color: #e07d0a; }
 
-        h1 { color: #f7931a !important; }
+        .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #f7931a 0%, #e8740c 100%) !important;
+            color: #14100a !important;
+            border: none !important;
+            box-shadow: 0 4px 14px rgba(247,147,26,.30) !important;
+        }
+        .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+            background: linear-gradient(135deg, #ffa72e 0%, #f7931a 100%) !important;
+            box-shadow: 0 6px 20px rgba(247,147,26,.45) !important;
+            transform: translateY(-1px);
+        }
+
+        .stButton > button[kind="secondary"],
+        .stDownloadButton > button:not([kind="primary"]) {
+            background: linear-gradient(135deg, #2d3a5e 0%, #24304e 100%) !important;
+            color: #e8ecf3 !important;
+            border: 1px solid #45527a !important;
+            box-shadow: 0 3px 10px rgba(0,0,0,.3) !important;
+        }
+        .stButton > button[kind="secondary"]:hover,
+        .stDownloadButton > button:not([kind="primary"]):hover {
+            background: linear-gradient(135deg, #3a4a78 0%, #2d3a5e 100%) !important;
+            border-color: #f7931a99 !important;
+            color: #ffffff !important;
+            transform: translateY(-1px);
+        }
+
+        .stButton > button:disabled, .stDownloadButton > button:disabled {
+            background: #1c2333 !important;
+            color: #5b6478 !important;
+            border: 1px solid #2a3247 !important;
+            box-shadow: none !important;
+        }
+
+        section[data-testid="stSidebar"] .stButton > button,
+        section[data-testid="stSidebar"] .stDownloadButton > button {
+            background: linear-gradient(135deg, #2d3a5e 0%, #24304e 100%) !important;
+            color: #e8ecf3 !important;
+            border: 1px solid #45527a !important;
+            font-weight: 600 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:hover,
+        section[data-testid="stSidebar"] .stDownloadButton > button:hover {
+            background: linear-gradient(135deg, #f7931a 0%, #e8740c 100%) !important;
+            color: #14100a !important;
+            border-color: #f7931a !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:hover *,
+        section[data-testid="stSidebar"] .stDownloadButton > button:hover * {
+            color: #14100a !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:disabled {
+            background: #1c2333 !important;
+            border: 1px solid #2a3247 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:disabled * {
+            color: #5b6478 !important;
+        }
+
+        div[data-testid="stFileUploader"] section {
+            background: #1a2030 !important;
+            border: 2px dashed #45527a !important;
+            border-radius: 12px !important;
+        }
+        div[data-testid="stFileUploader"] section:hover { border-color: #f7931a !important; }
+        div[data-testid="stFileUploader"] button {
+            background: linear-gradient(135deg, #2d3a5e 0%, #24304e 100%) !important;
+            color: #e8ecf3 !important;
+            border: 1px solid #45527a !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+        }
+        div[data-testid="stFileUploader"] button:hover {
+            background: linear-gradient(135deg, #f7931a 0%, #e8740c 100%) !important;
+            border-color: #f7931a !important;
+        }
+        div[data-testid="stFileUploader"] button:hover * { color: #14100a !important; }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 6px;
+            background: #161b27;
+            padding: 6px;
+            border-radius: 12px;
+            border: 1px solid #2a3247;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px;
+            color: #8b93a7;
+            font-weight: 600;
+            padding: 8px 18px;
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #f7931a 0%, #e8740c 100%) !important;
+            color: #14100a !important;
+        }
+        .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+
+        div[data-testid="stExpander"] {
+            background: #161b27;
+            border: 1px solid #2a3247 !important;
+            border-radius: 12px !important;
+            overflow: hidden;
+        }
+        div[data-testid="stExpander"] summary:hover { color: #f7931a !important; }
+
+        .stTextInput input, .stNumberInput input, .stTextArea textarea,
+        div[data-baseweb="select"] > div {
+            background: #1a2030 !important;
+            border: 1px solid #2a3247 !important;
+            border-radius: 10px !important;
+            color: #e8ecf3 !important;
+        }
+        .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+            border-color: #f7931a !important;
+            box-shadow: 0 0 0 1px #f7931a55 !important;
+        }
+
+        .stNumberInput button {
+            background: #232c44 !important;
+            color: #e8ecf3 !important;
+            border-color: #2a3247 !important;
+        }
+        .stNumberInput button:hover { background: #2d3a5e !important; color: #f7931a !important; }
+
+        div[data-testid="stAlert"] { border-radius: 12px; }
+
+        div[data-testid="stDataFrame"] {
+            border: 1px solid #2a3247;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        hr { border-color: #2a3247 !important; }
+
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: #11151f; }
+        ::-webkit-scrollbar-thumb { background: #2d3a5e; border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: #f7931a; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -312,6 +566,27 @@ with st.sidebar:
             width="stretch",
             key="btn_export_db",
         )
+        st.markdown("---")
+        st.markdown("**Compartir BD por WiFi (QR)**")
+        st.caption("Genera un QR para que la app movil descargue la BD por la red local. La transferencia expira pronto y se cierra tras la primera descarga correcta.")
+        if st.button("Generar QR de transferencia", width="stretch", key="btn_qr_share"):
+            try:
+                url, _srv = iniciar_servidor_qr(duracion_seg=180)
+                st.session_state["qr_url"] = url
+                st.session_state["qr_expira"] = time.time() + 180
+            except Exception as e:
+                st.error(f"No se pudo iniciar el servidor: {e}")
+        if "qr_url" in st.session_state and time.time() < st.session_state.get("qr_expira", 0):
+            png = generar_qr_png(st.session_state["qr_url"])
+            if png is None:
+                st.warning("Instala 'qrcode[pil]' para generar el codigo: pip install qrcode[pil]")
+                st.code(st.session_state["qr_url"])
+            else:
+                st.image(png, caption="Escanea desde la app movil", width=240)
+                restante = int(st.session_state["qr_expira"] - time.time())
+                st.caption(f"Valido por {restante}s. URL: {st.session_state['qr_url']}")
+
+        st.markdown("---")
         st.markdown("**Importar base de datos**")
         archivo = st.file_uploader("Selecciona un archivo .db", type=["db", "sqlite", "sqlite3"], key="db_uploader")
         confirmar = st.checkbox("Entiendo que se reemplazará la base de datos actual (se crea un backup automático).", key="chk_import")
